@@ -1,0 +1,195 @@
+import foolbox2 as fb
+import torch
+import torchvision
+import matplotlib.pyplot as plt
+import eagerpy as ep
+import numpy as np
+from torchvision import transforms
+from torchvision.io import read_image
+from torch.utils.data import Dataset, DataLoader
+from torchvision.utils import save_image
+from tqdm import tqdm
+import os
+from PIL import Image
+import pandas as pd
+import fnmatch
+import pynvml
+
+    
+rg = 10 #t1t1
+batch_size = 10
+
+
+# direction for the dataset
+
+img_dir='/nfs/nas4/bbonnet/bbonnet/datasets/images/imagenet_val/'
+csv_dir = '/nfs/nas4/bbonnet/bbonnet/datasets/labels/imagenet_2012_val/valid.csv'
+
+
+"""
+img_dir = '/run/media/paul/EMTEC C410/images 1k'
+csv_dir = '/run/media/paul/EMTEC C410/labels.csv'"""
+
+
+# create the dataset
+class FaceDataset(Dataset):
+    """FaceDataset: representation of the CPF dataset.
+    
+    Attributes:
+        len: An integer number of elements in the
+        img_dir: Directory containing the images of the INRIA dataset.
+        lab_dir: Directory containing the labels of the INRIA dataset.
+        img_names: List of all image file names in img_dir.
+        shuffle: Whether or not to shuffle the dataset."""
+        
+    
+
+    def __init__(self, img_dir, lab_dir, shuffle=False):
+        
+        n_images = len(fnmatch.filter(os.listdir(img_dir), '*.JPEG'))
+        df = pd.read_csv(lab_dir, sep=',')
+        dict_labs = dict(zip(df.ImageID.values+'.JPEG', df.Label.values ))
+        self.len = n_images
+        self.img_dir = img_dir
+        self.lab_dir = lab_dir
+        self.img_names = fnmatch.filter(os.listdir(img_dir), '*.JPEG')
+        self.shuffle = shuffle
+        self.img_paths = []
+        for img_name in self.img_names:
+            self.img_paths.append(os.path.join(self.img_dir, img_name))
+        self.labs_ = []
+        for img_name in self.img_names:
+            lab = dict_labs[img_name]
+            self.labs_.append(lab)
+
+    def __len__(self):
+        return self.len
+    
+    def get_len(self):
+        return self.len
+    
+    def __getitem__(self, idx):
+        assert idx <= len(self), 'index range error'
+        img_path = os.path.join(self.img_dir, self.img_names[idx])
+        image = Image.open(img_path).convert('RGB')
+        label = self.labs_[idx]
+        
+        transform = transforms.ToTensor()
+        image = transform(image)
+        transform = transforms.Resize((224,224))
+        image = transform(image)
+
+        return image, label
+
+
+
+# load the modek=l
+model = torchvision.models.efficientnet_b0(pretrained=True)
+model = model.eval()
+preprocessing = dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], axis=-3)
+bounds = (0, 1)
+fmodel = fb.PyTorchModel(model, bounds=bounds, preprocessing=preprocessing)
+
+# load the dataset
+data = FaceDataset(img_dir,csv_dir)
+
+# create a subset of the dataset where all the images are well classified
+
+
+data = torch.utils.data.Subset(data,range(rg))
+testloader = DataLoader(data,batch_size=batch_size,num_workers=2)
+
+
+attack_iHL_100 = fb.attacks.iHL_RFAttack(steps=25,abort_early=False,tau=0.1)
+attack_iHL_500 = fb.attacks.iHL_RFAttack(steps=500,abort_early = False,tau=0.1)
+attack_iHL_1000 = fb.attacks.iHL_RFAttack(steps=1000,min_steps=100)
+
+attack_cw_10_10 = fb.attacks.L2CarliniWagnerAttack(binary_search_steps=10,steps=10,abort_early=False)
+attack_cw_10_50 = fb.attacks.L2CarliniWagnerAttack(binary_search_steps=10,steps=50,abort_early=False)
+attack_cw_10_100 = fb.attacks.L2CarliniWagnerAttack(binary_search_steps=10,steps=100,abort_early=False)
+
+attack_fmn_100 = fb.attacks.L2FMNAttack(steps = 100)
+attack_fmn_200 = fb.attacks.L2FMNAttack(steps = 200)
+
+attack_deepfool_5_100 = fb.attacks.L2DeepFoolAttack(steps = 100,candidates = 10)
+
+
+attack_list = [attack_iHL_100]#attack_cw_10_10]#,attack_iHL_500,attack_iHL_1000,attack_cw_10_10,attack_cw_10_50,attack_cw_10_100]
+name_list = ['test']#,'attack_cw_10_10']#,'attack_iHL_500','attack_iHL_1000','attack_cw_10_10','attack_cw_10_50','attack_cw_10_100']
+
+
+def total(attack_list,name_list):    
+    
+    size_im = 0
+    nb_im = 0
+    nb_well_class = 0
+    for data in testloader:
+        images, labels = data
+        images ,labels = images.cuda(),labels.cuda()
+        size_im = len(images[0]),len(images[0][0]),len(images[0][0][0])
+        with torch.no_grad():
+            nb_well_class += (fmodel(images).argmax(axis=-1)==labels).sum().item()
+        nb_im += len(images)
+        del images,labels
+    print('accuracy model ' + str(100 * nb_well_class/nb_im))
+
+    def att(attack,name):
+        dist_adv = []
+        well_att_and_class = []
+        well_class = 0
+        well_att = 0
+        j=0
+        for i,data in tqdm(enumerate(testloader),total = len(testloader)):
+            with torch.no_grad():
+                images, labels = data
+                images ,labels = images.cuda(),labels.cuda()
+            adv, _, _ = attack(fmodel, images, labels,epsilons=0.03)
+            res = (images - adv) * 200
+            """save_image(images,'results/images a attaquer' + str(j) + '.jpg')
+            save_image(res,'results/diff images' + str(j) + '.jpg')
+            save_image(adv,'results/image attaque' + str(j) + '.jpg')"""
+            
+            j+=1
+            with torch.no_grad():
+                for i in range(len(images)):
+                    if fmodel(ep.reshape(images[i],(1,3,224,224))).argmax(axis=-1)==labels[i] and fmodel(ep.reshape(adv[i],(1,3,224,224))).argmax(axis=-1)!=labels[i]:
+                        well_att_and_class.append(True)
+                        dist_adv.append((fb.distances.l2(ep.reshape(adv[i], (1,3,224,224))*255,ep.reshape(images[i], (1,3,224,224))*255)/np.sqrt(size_im[0]*size_im[1]*size_im[2])).item())
+                        well_class+=1
+                        well_att+=1
+                    elif fmodel(ep.reshape(images[i],(1,3,224,224))).argmax(axis=-1)==labels[i]:
+                        well_att_and_class.append(False)
+                        dist_adv.append(np.inf)
+                        well_class+=1
+                    else:
+                        well_att_and_class.append(False)
+                        dist_adv.append(0)
+                        
+
+                    
+                        
+            del images,labels,adv
+            torch.cuda.empty_cache()
+        with open('att_dist_' + str(name) +  '.txt',"w") as f:
+            f.write(str(well_att_and_class)+" well atta and class \n")
+            f.write(str(well_class/nb_im) +' acc model '+str(well_att/well_class)+' acc att / well class '+str(well_att/nb_im)+' acc att / model \n')
+        print(well_att_and_class,"well atta and class ")
+        print(well_class/nb_im ,'acc model',well_att/well_class,'acc att / well class', well_att/nb_im,'acc att / model')
+        return well_att_and_class , dist_adv
+
+    
+        
+    for i in range(len(attack_list)):
+        well_att_and_class, dist_adv = att(attack_list[i], name_list[i])
+        torch.cuda.empty_cache()
+        with open('att_dist_' + str(name_list[i]) + '.txt',"w") as f:
+            f.write(name_list[i] + ' dist attack ' + str(dist_adv) + '\n')
+            f.write(name_list[i] + ' well att ' + str(well_att_and_class) + '\n')
+
+        del well_att_and_class,dist_adv
+        torch.cuda.empty_cache()
+    
+
+
+
+total(attack_list,name_list)
