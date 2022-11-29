@@ -11,16 +11,14 @@ from dataset import InferenceDataset
 from load import get_model
 from tqdm import tqdm
 
-
+    
 n_images = 50 # Nombre d'images
 batch_size = 32
 seed = 20
 model_name = "efficientnet_b0"
-output_dir = "/home/paul/Documents/results{}".format(model_name)
+output_dir = "/udd/tmaho/hlrf/{}".format(model_name)
 os.makedirs(output_dir, exist_ok=True)
 img_dir = "/udd/tmaho/transferable/correctly_classified/dataset_val-51_models.npy"
-img_dir = '/run/media/paul/EMTEC C410/images 1k'
-csv_dir = '/run/media/paul/EMTEC C410/labels.csv'
 images = np.load(img_dir)
 random.seed(seed)
 images = random.choices(images, k=n_images)

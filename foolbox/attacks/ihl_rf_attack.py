@@ -52,7 +52,10 @@ class iHL_RFAttack(MinimizationAttack):
         abort_early: bool = True,
         min_steps: int = 25,
         max_queries=None,
-        d1_d2_ratio=2
+        d1_d2_ratio=2,
+        delta=10e-5,
+        eta=2,
+        nhl_rf=False
     ):
         self.steps = steps
         self.confidence = confidence
@@ -62,6 +65,9 @@ class iHL_RFAttack(MinimizationAttack):
         self.abort_early = abort_early
         self.min_steps = min_steps
         self.max_queries = max_queries
+        self.delta = delta
+        self.eta = eta
+        self.nhl_rf = nhl_rf
         
         self.queries = None
         self.gamma_speed_step = 1
@@ -110,6 +116,7 @@ class iHL_RFAttack(MinimizationAttack):
         raise_if_kwargs(kwargs)
         self.queries = np.zeros(len(inputs))
         x, restore_type = ep.astensor_(inputs)
+        self.x = x
         criterion_ = get_criterion(criterion)
         del inputs, criterion, kwargs
         verify_input_bounds(x, model)
@@ -136,6 +143,7 @@ class iHL_RFAttack(MinimizationAttack):
 
         advs = copy.deepcopy(x)
         _, loss, gradient = loss_aux_and_grad(x)
+        self.g_0 = loss
         # advs = x - 0.5 * gradient / atleast_kd(gradient.flatten(1).norms.lp(p=2, axis=1), gradient.ndim)
 
         found_advs = ep.zeros_like(classes).bool()
@@ -157,6 +165,7 @@ class iHL_RFAttack(MinimizationAttack):
         self.descent_dir_norm = [[] for k in range(len(x))]
         self.d1_norm = [[] for k in range(len(x))]
         self.d2_norm = [[] for k in range(len(x))]
+        self.d2_kept_norm = [[] for k in range(len(x))]
 
         norms = ep.astensor((advs - x).raw.flatten(1).norm(dim=1))
         true_norm_grad = gradient.flatten(1).norms.lp(p=2, axis=1)
@@ -171,28 +180,39 @@ class iHL_RFAttack(MinimizationAttack):
             self.true_gradient_norm[i].append(true_norm_grad[i].raw.cpu())
 
 
-        for step in range(self.steps):
+            self.armijo_step[i].append(-1)
+            self.perturbation_added_dist[i].append(-1)
+            self.query_history[i].append(0)
+            self.descent_dir_norm[i].append(-1)
 
+            self.d1_norm[i].append(-1)
+            self.d2_norm[i].append(-1)
+            self.d2_kept_norm[i].append(-1)
+        self.loss_under = loss < 0.2
+
+        for step in range(self.steps):
 
             it_query_start =self.queries
             self.queries += 1
             _, loss, gradient = loss_aux_and_grad(advs)
+            self.loss_under = ep.logical_or(self.loss_under,  loss < 0.2)
 
             perturbation = advs - x
 
             desc_dir = self.descent_dir(perturbation, gradient, loss)
             desc_dir_norm = desc_dir.flatten(1).norms.lp(p=2, axis=1)
-            # desc_dir /= atleast_kd(desc_dir_norm, desc_dir.ndim)
+            desc_dir /= atleast_kd(desc_dir_norm, desc_dir.ndim)
 
-            stepsize = self.pred_stepsize(x=x, perturbation=perturbation, desc_dir=desc_dir, loss_x=loss, grad_x=gradient)
+            stepsize = self.pred_stepsize(x=x, perturbation=perturbation, desc_dir=desc_dir, loss_x=loss, grad_x=gradient, nhl_rf=self.nhl_rf)
 
             next_step = desc_dir * atleast_kd(stepsize, desc_dir.ndim)
             if step < 1:
                 norm_step = next_step.flatten(1).norms.lp(p=2, axis=1)
                 norm_step = atleast_kd(norm_step, next_step.ndim)
+                max_step = 5
                 next_step = ep.where(
-                    norm_step > 5,
-                    5 * next_step / atleast_kd(norm_step, next_step.ndim),
+                    norm_step > max_step,
+                    max_step * next_step / atleast_kd(norm_step, next_step.ndim),
                     next_step
                 )
 
@@ -253,61 +273,90 @@ class iHL_RFAttack(MinimizationAttack):
         # norm_grad = ep.where(norm_grad >= 2, 2, norm_grad)
         return norm_grad
 
-    def _d1(self, grad, perturbation, norm_grad):
+    def _d2(self, grad, perturbation, norm_grad):
         inner_product = (grad * perturbation).flatten(1).sum(axis=1)
         inner_product /=  (norm_grad**2)
-        d1 = atleast_kd(inner_product, grad.ndim) * grad
-        d1 -= perturbation
-        return d1
-
-    def _d2(self, grad, loss_x, norm_grad):
-        d2 = - atleast_kd(loss_x / norm_grad**2, grad.ndim) * grad
+        d2 = atleast_kd(inner_product, grad.ndim) * grad
+        d2 -= perturbation
         return d2
+
+    def _d1(self, grad, loss_x, norm_grad):
+        d1 = - atleast_kd(loss_x / norm_grad**2, grad.ndim) * grad
+        return d1
 
     def descent_dir(self, perturbation: ep.Tensor, grad: ep.Tensor, loss_x: ep.Tensor) -> ep.Tensor:
         norm_grad = self.get_norm_grad(grad)
-        d1 = self._d1(grad, perturbation=perturbation, norm_grad=norm_grad)
-        d2 = self._d2(grad, loss_x=loss_x, norm_grad=norm_grad)
+        d2 = self._d2(grad, perturbation=perturbation, norm_grad=norm_grad)
+        d1 = self._d1(grad, loss_x=loss_x, norm_grad=norm_grad)
 
-        d1_norm = d1.flatten(1).norms.lp(p=2, axis=1)
         d2_norm = d2.flatten(1).norms.lp(p=2, axis=1)
+        d1_norm = d1.flatten(1).norms.lp(p=2, axis=1)
 
         for i in range(len(perturbation)):
             self.d1_norm[i].append(float(d1_norm[i].raw.cpu()))
             self.d2_norm[i].append(float(d2_norm[i].raw.cpu()))
 
         d1_normalized = d1 / atleast_kd(d1_norm, d1.ndim)
-
-        # d1 = ep.where(
-        #     atleast_kd(d1_norm > self.d1_d2_ratio * d2_norm, d1.ndim),
-        #     self.d1_d2_ratio * d1_normalized * atleast_kd(d2_norm, d1.ndim),
-        #     d1
-        # )
-        
-        d1 = ep.where(
-            atleast_kd(ep.logical_and(
-                d1_norm > self.d1_d2_ratio * d2_norm,
-                loss_x > 0
-            ), d1.ndim),
-            self.d1_d2_ratio * d1_normalized * atleast_kd(d2_norm, d1.ndim),
-            d1
+        d2_normalized = d2 / atleast_kd(d2_norm, d2.ndim)
+        norm_perturbation = perturbation.flatten(1).norms.lp(p=2, axis=1)
+        d2 = ep.where(
+            atleast_kd(d2_norm > self.d1_d2_ratio * norm_perturbation, d2.ndim),
+            self.d1_d2_ratio * d2_normalized * atleast_kd(norm_perturbation, d1.ndim),
+            d2
         )
-        return d1 + d2
+        
+        # d2 = ep.where(
+        #     atleast_kd(ep.logical_and(
+        #         d2_norm > self.d1_d2_ratio * d1_norm,
+        #         loss_x > 0
+        #     ), d2.ndim),
+        #     self.d1_d2_ratio * d2_normalized * atleast_kd(d1_norm, d1.ndim),
+        #     d2
+        # )
+        d2_norm = d2.flatten(1).norms.lp(p=2, axis=1)
+        for i in range(len(perturbation)):
+            self.d2_kept_norm[i].append(float(d2_norm[i].raw.cpu()))
+        d = d1 + d2
+        return d 
 
     # find the best stepsize thanks to the armijo's rule
-    def pred_stepsize(self, x, perturbation: ep.Tensor, desc_dir: ep.Tensor, loss_x: ep.Tensor, grad_x: ep.Tensor) -> ep.Tensor:
+    def pred_stepsize(self, x, perturbation: ep.Tensor, desc_dir: ep.Tensor, loss_x: ep.Tensor, grad_x: ep.Tensor, nhl_rf: bool = True) -> ep.Tensor:
         step_armijo = ep.full_like(loss_x, 0)
         norm_perturbation = perturbation.flatten(1).norms.lp(p=2, axis=1)
         norm_grad = self.get_norm_grad(grad_x)
 
         # sigm = ep.maximum((self.smooth * norm_perturbation) / norm_grad, (self.sigma + 1))
+
+        norm_perturbation_and_d = (perturbation + desc_dir).flatten(1).norms.lp(p=2, axis=1)
+
         sigm = (self.smooth * norm_perturbation) / norm_grad
+
+        if nhl_rf:
+            inner_product = (grad_x * perturbation).flatten(1).sum(axis=1)
+            inner_product /=  (norm_grad**2)
+            sigm = ep.where(
+                abs(loss_x) >= self.delta,
+                abs((1/loss_x)*inner_product),
+                norm_perturbation / norm_grad
+            )
+
+        
+        else:
+            sigm = ep.where(
+                abs(loss_x) >= self.delta * self.g_0,
+                ep.maximum(
+                    norm_perturbation / norm_grad,
+                    0.5 * norm_perturbation_and_d**2 / abs(loss_x)
+                ),
+                norm_perturbation / norm_grad
+            )
+        sigm *= self.eta
 
         for i in range(len(x)):
             self.norm_grad_history[i].append(float(norm_grad[i].raw.cpu()))
             self.perturbation_grad_ratio_history[i].append(float(sigm[i].raw.cpu()))
 
-        sigm *= self.c_sigma
+        # sigm *= self.c_sigma
 
         self.sigma = sigm
 
@@ -321,14 +370,20 @@ class iHL_RFAttack(MinimizationAttack):
         k = 0
         while not found_armijo.all() and k <= 4: #((self.tau**k) > 10e-4):
             x_step = perturbation + self.gamma_speed_step * desc_dir * self.tau**k
-            # x_step = ep.clip(x_step + inputs_, *model.bounds) - inputs_
+            # x_step = ep.clip(x_step, *self.model.bounds)
 
             _, loss_step = self.loss_fun(x_step + x)
             norm_step = x_step.flatten(1).norms.lp(p=2, axis=1)
             respect_armijo = merit(sigm, norm_step, loss_step) - mer <= cond * self.tau**k
             respect_armijo = respect_armijo.bool()
 
-            respect_armijo = ep.logical_and(respect_armijo, loss_step > -0.1)
+            respect_armijo = ep.logical_and(respect_armijo, loss_step > -0.2)
+
+            respect_armijo = ep.where(
+                self.loss_under,
+                ep.logical_and(respect_armijo, loss_step < 0.2),
+                respect_armijo)
+
 
             alr_armijo = ep.where(respect_armijo, self.tau**k, 0)
             for i, e in enumerate(step_armijo):
@@ -353,18 +408,18 @@ def best_other_classes(logits: ep.Tensor, exclude: ep.Tensor) -> ep.Tensor:
 
 # define the merit function and her gradient for the armijo's rule
 def merit(sigma: ep.Tensor, norm_x: ep.Tensor, loss_x: ep.Tensor) -> ep.Tensor:
-    mer = ep.where(
-            loss_x > 0,
-            ep.abs(loss_x),
-            0.5 * (norm_x) ** 2 + sigma * ep.abs(loss_x)
-        )
+    # mer = ep.where(
+    #         loss_x > 0,
+    #         ep.abs(loss_x),
+    #         0.5 * (norm_x) ** 2 + sigma * ep.abs(loss_x)
+    #     )
 
     # mer = ep.where(
     #     loss_x > 0,
     #     ep.abs(loss_x),
     #     (norm_x) ** 2
     # )
-    # mer  = 0.5 * (norm_x) ** 2 + sigma * ep.abs(loss_x)
+    mer  = 0.5 * (norm_x) ** 2 + sigma * ep.abs(loss_x)
     return mer
 
 

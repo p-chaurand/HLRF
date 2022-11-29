@@ -15,10 +15,10 @@ from tqdm import tqdm
 n_images = 50 # Nombre d'images
 batch_size = 8
 seed = 20
-n_iterations = 20
+n_iterations = 5
 
 model_name = "efficientnet_b0"
-model_name = "resnet50"
+# model_name = "resnet50"
 # model_name = "levit_384"
 output_dir = "/udd/tmaho/hlrf/{}-confidence_evolution".format(model_name)
 os.makedirs(output_dir, exist_ok=True)
@@ -41,20 +41,44 @@ testloader = DataLoader(data, batch_size=batch_size, num_workers=2)
 
 
 
+# attack_list = []
+# for p in [0.1, 0.5, 1, 2, 4, 10]:
+#     attack_list.append((
+#         fb.attacks.iHL_RFAttack(
+#             steps=n_iterations, 
+#             abort_early=False, 
+#             tau=0.5, 
+#             confidence=0.01, 
+#             c_sigma_gain=1, 
+#             c_sigma_start=1.00001,
+#             omega=0.1,
+#             d1_d2_ratio=p
+#             ),
+#         "confidence=={}".format(p)))
+
+# attack_list = []
+# nhl_rf = False
+# for p_1 in np.linspace(0.5,5,5):
+#     for p in [0.001]:
+#         attack_list.append((
+#             fb.attacks.iHL_RFAttack(
+#                 steps=n_iterations, 
+#                 abort_early=False, 
+#                 tau=0.5, 
+#                 confidence=0.1, 
+#                 c_sigma_gain=1, 
+#                 c_sigma_start=1.00001,
+#                 omega=0.001,
+#                 smooth=4,
+#                 d1_d2_ratio=0.05,
+#                 delta= p,
+#                 eta=p_1,
+#                 nhl_rf=nhl_rf
+#                 ),
+#             f"eta={p_1}, delta = {p}, nHL-RF = {nhl_rf}"))
+
 attack_list = []
-for p in [0.1, 0.5, 1, 2, 4, 10]:
-    attack_list.append((
-        fb.attacks.iHL_RFAttack(
-            steps=n_iterations, 
-            abort_early=False, 
-            tau=0.05, 
-            confidence=0.01, 
-            c_sigma_gain=1, 
-            c_sigma_start=1.00001,
-            omega=0.0001,
-            d1_d2_ratio=p
-            ),
-        "confidence=={}".format(p)))
+attack_list.append((BP(steps=15), "BP"))
 
 def total(attack_list):    
     
