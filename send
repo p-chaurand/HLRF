@@ -83,7 +83,7 @@ class FaceDataset(Dataset):
 
 
 
-# load the modek=l
+# load the model
 model = torchvision.models.efficientnet_b0(pretrained=True)
 model = model.eval()
 preprocessing = dict(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], axis=-3)
