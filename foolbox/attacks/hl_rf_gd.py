@@ -18,7 +18,7 @@ from .base import verify_input_bounds
 
 
 
-class iHL_RFAttack(MinimizationAttack):
+class HL_RFAttack(MinimizationAttack):
     """Implementation of the improved Hasofer-Lind, Rackwitz-Fiessler Attack.
 
     Args:
