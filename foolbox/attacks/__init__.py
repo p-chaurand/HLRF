@@ -71,8 +71,9 @@ from .fast_minimum_norm import (  # noqa: F401
 )
 from .gen_attack import GenAttack  # noqa: F401
 from .pointwise import PointwiseAttack  # noqa: F401
-from .ihl_rf_attack import iHL_RFAttack
-from .boundary_projection import BP, BPArmijo
+from .hl_rf_gd import HL_RFAttack
+from .boundary_projection import BP
+
 
 # from .blended_noise import LinearSearchBlendedUniformNoiseAttack  # noqa: F401
 # from .brendel_bethge import (  # noqa: F401
@@ -100,3 +101,4 @@ L1AdamPGD = L1AdamProjectedGradientDescentAttack
 L2AdamPGD = L2AdamProjectedGradientDescentAttack
 LinfAdamPGD = LinfAdamProjectedGradientDescentAttack
 AdamPGD = LinfAdamPGD
+
